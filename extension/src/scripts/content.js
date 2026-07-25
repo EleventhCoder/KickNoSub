@@ -140,41 +140,61 @@ function checkStreamUrl(url) {
 
 async function getVideoMetadata(channelSlug, videoSlug) {
     try {
-        const response = await fetch(`https://kick.com/api/v1/channels/${channelSlug}`);
-        if (!response.ok) return null;
-        const data = await response.json();
+        const chRes = await fetch(`https://kick.com/api/v2/channels/${channelSlug}`);
+        if (!chRes.ok) return null;
+        const chData = await chRes.json();
+        const channelId = chData.id;
+
+        const vidRes = await fetch(`https://web.kick.com/api/v1/channels/${channelId}/videos`, {
+            headers: {
+                "Accept": "application/json",
+                "Alt-Used": "web.kick.com",
+                "Origin": "https://kick.com",
+                "Referer": "https://kick.com/"
+            }
+        });
+        if (!vidRes.ok) return null;
+
+        const vidData = await vidRes.json();
+        let videosList = vidData.data || vidData.videos || [];
+        if (Array.isArray(vidData)) videosList = vidData;
+
+        const targetVideo = videosList.find(v => String(v.id) === videoSlug);
+        if (!targetVideo) return null;
+
         return {
-            video: data.previous_livestreams ? data.previous_livestreams.find(v => v.slug === videoSlug || v.video.uuid === videoSlug) : null,
-            channelId: data.id,
+            video: targetVideo,
+            channelId: channelId,
             channelSlug: channelSlug
         };
-    } catch (e) { return null; }
+    } catch (e) { 
+        return null; 
+    }
 }
 
 async function findStreamUrlFromMetadata(metadata) {
-    const { video, channelId } = metadata;
+    const { video } = metadata;
     if (!video) return null;
 
-    // Quick candidate gen
-    const thumbUrl = video.thumbnail.src || video.thumbnail.url;
-    const candidates = [];
-    if (thumbUrl) {
-        const parts = thumbUrl.split('/');
-        const ivsIndex = parts.indexOf('ivs');
-        if (ivsIndex !== -1 && parts[ivsIndex + 1] === 'v1') candidates.push({ cid: parts[ivsIndex + 2], vid: parts[ivsIndex + 3] });
-        else if (parts.length > 5) candidates.push({ cid: parts[4], vid: parts[5] });
+    const thumbUrl = (video.thumbnail && video.thumbnail.src) ? video.thumbnail.src : "";
+    const thumbParts = thumbUrl.split('/');
+    const idx = thumbParts.indexOf("video_thumbnails");
+    
+    if (idx === -1 || idx + 2 >= thumbParts.length) {
+        console.error("Kick Unlocker: Could not parse session/segment from thumbnail", thumbUrl);
+        return null;
     }
-    if (channelId && video.video.uuid) candidates.push({ cid: channelId, vid: video.video.uuid });
-    if (channelId && video.id) candidates.push({ cid: channelId, vid: video.id });
 
-    const uniqueCandidates = candidates.filter((item, index, self) =>
-        index === self.findIndex((t) => t.cid === item.cid && t.vid === item.vid)
-    );
+    const sessionId = thumbParts[idx + 1];
+    const segmentId = thumbParts[idx + 2];
 
-    let startTimeStr = video.start_time.replace(' ', 'T');
-    if (!startTimeStr.endsWith('Z')) startTimeStr += 'Z';
-    const startTime = new Date(startTimeStr);
-    const baseUrls = ["https://stream.kick.com/ivs/v1/196233775518", "https://stream.kick.com/3c81249a5ce0/ivs/v1/196233775518", "https://stream.kick.com/0f3cb0ebce7/ivs/v1/196233775518"];
+    const startTime = new Date(video.start_time.replace(' ', 'T') + (video.start_time.endsWith('Z') ? '' : 'Z'));
+    
+    const baseUrls = [
+        "https://stream.kick.com/ivs/v1/196233775518",
+        "https://stream.kick.com/3c81249a5ce0/ivs/v1/196233775518",
+        "https://stream.kick.com/0f3cb0ebce7/ivs/v1/196233775518"
+    ];
 
     const tasks = [];
     const offsets = [0, 1, -1, 2, -2, 3, -3, 4, -4, 5, -5];
@@ -186,10 +206,9 @@ async function findStreamUrlFromMetadata(metadata) {
         const d = t.getUTCDate();
         const h = t.getUTCHours();
         const min = t.getUTCMinutes();
-        for (const candidate of uniqueCandidates) {
-            for (const base of baseUrls) {
-                tasks.push(`${base}/${candidate.cid}/${y}/${m}/${d}/${h}/${min}/${candidate.vid}/media/hls/master.m3u8`);
-            }
+
+        for (const base of baseUrls) {
+            tasks.push(`${base}/${sessionId}/${y}/${m}/${d}/${h}/${min}/${segmentId}/media/hls/master.m3u8`);
         }
     }
     for (const url of tasks) {

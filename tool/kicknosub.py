@@ -4,7 +4,6 @@ import platform
 import shutil
 import subprocess
 from datetime import datetime
-from kickapi import KickAPI
 from rich.console import Console
 from rich.panel import Panel
 import questionary
@@ -15,7 +14,6 @@ class KickNoSub:
     def __init__(self):
         self.console = Console()
         self.session = cloudscraper.CloudScraper()
-        self.api = KickAPI()
         self.os_name = platform.system()
         self.ffmpeg_local_path = os.path.join(
             os.path.dirname(__file__), 
@@ -69,50 +67,73 @@ class KickNoSub:
                 return None
             channel_name = parts[3]
             video_slug = parts[5]
-    
-            channel = self.api.channel(channel_name)
-            for video in channel.videos:
-                if video.uuid == video_slug:
-                    thumbnail_url = video.thumbnail["src"]
-                    start_time = datetime.strptime(video.start_time, "%Y-%m-%d %H:%M:%S")
-                    path_parts = thumbnail_url.split("/")
-                    channel_id, video_id = path_parts[4], path_parts[5]
-    
-                    base_urls = [
-                        "https://stream.kick.com/ivs/v1/196233775518",
-                        "https://stream.kick.com/3c81249a5ce0/ivs/v1/196233775518",
-                        "https://stream.kick.com/0f3cb0ebce7/ivs/v1/196233775518"
-                    ]
-    
-                    for offset in range(-5, 6):
-                        adjusted_time = start_time + timedelta(minutes=offset)
-    
-                        for base in base_urls:
-                            if quality.lower() == "auto":
-                                url = (
-                                    f"{base}/{channel_id}/{adjusted_time.year}/{adjusted_time.month}/"
-                                    f"{adjusted_time.day}/{adjusted_time.hour}/{adjusted_time.minute}/"
-                                    f"{video_id}/media/hls/master.m3u8"
-                                )
-                            else:
-                                url = (
-                                    f"{base}/{channel_id}/{adjusted_time.year}/{adjusted_time.month}/"
-                                    f"{adjusted_time.day}/{adjusted_time.hour}/{adjusted_time.minute}/"
-                                    f"{video_id}/media/hls/{quality}/playlist.m3u8"
-                                )
-                            
-                            tried_urls.append(url)  # Save URL
-                            try:
-                                res = self.session.head(url, timeout=5)
-                            except Exception:
-                                continue
-    
-                            if res.status_code == 200:
-                                self.console.print(f"[green]✅ Found valid stream at offset {offset} minute(s)[/green]")
-                                return url
 
-                    self.console.print("[red]❌ Could not find a valid stream within ±5 minutes.[/red]")
-                    return None
+            ch_res = self.session.get(
+                f"https://kick.com/api/v2/channels/{channel_name}", 
+                headers={"Accept": "application/json"}
+            )
+            if ch_res.status_code != 200:
+                return None
+            channel_id = ch_res.json().get("id")
+
+            vid_res = self.session.get(
+                f"https://web.kick.com/api/v1/channels/{channel_id}/videos",
+                headers={
+                    "Accept": "application/json",
+                    "Alt-Used": "web.kick.com",
+                    "Origin": "https://kick.com",
+                    "Referer": "https://kick.com/",
+                }
+            )
+            if vid_res.status_code != 200:
+                return None
+
+            data = vid_res.json()
+            videos_list = data.get("data") or data.get("videos") or []
+            target = next((v for v in videos_list if str(v.get("id")) == video_slug), None)
+            if not target:
+                return None
+
+            thumbnail_url = target.get("thumbnail", {}).get("src", "")
+            path_parts = thumbnail_url.split("/")
+            idx = path_parts.index("video_thumbnails")
+            session_id, segment_id = path_parts[idx + 1], path_parts[idx + 2]
+
+            start_time = datetime.strptime(target.get("start_time"), "%Y-%m-%dT%H:%M:%SZ")
+
+            base_urls = [
+                "https://stream.kick.com/ivs/v1/196233775518",
+                "https://stream.kick.com/3c81249a5ce0/ivs/v1/196233775518",
+                "https://stream.kick.com/0f3cb0ebce7/ivs/v1/196233775518"
+            ]
+
+            for offset in range(-5, 6):
+                adjusted_time = start_time + timedelta(minutes=offset)
+
+                for base in base_urls:
+                    if quality.lower() == "auto":
+                        url = (
+                            f"{base}/{session_id}/{adjusted_time.year}/{adjusted_time.month}/"
+                            f"{adjusted_time.day}/{adjusted_time.hour}/{adjusted_time.minute}/"
+                            f"{segment_id}/media/hls/master.m3u8"
+                        )
+                    else:
+                        url = (
+                            f"{base}/{session_id}/{adjusted_time.year}/{adjusted_time.month}/"
+                            f"{adjusted_time.day}/{adjusted_time.hour}/{adjusted_time.minute}/"
+                            f"{segment_id}/media/hls/{quality}/playlist.m3u8"
+                        )
+                    
+                    tried_urls.append(url)  # Save URL
+                    try:
+                        res = self.session.head(url, timeout=5)
+                        if res.status_code == 200:
+                            self.console.print(f"[green]✅ Found valid stream at offset {offset} minute(s)[/green]")
+                            return url
+                    except Exception:
+                        continue
+
+            self.console.print("[red]❌ Could not find a valid stream within ±5 minutes.[/red]")
             return None
         except Exception as e:
             self.console.print(f"[red]Error:[/red] {e}")
